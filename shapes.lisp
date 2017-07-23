@@ -7,38 +7,12 @@
 
 (declaim (optimize (speed 3) (safety 3) (size 0) (debug 3)))
 
+(gl:define-gl-array-format position-normal-color
+  (gl:vertex :type :double :components (x y z))
+  (gl:normal :type :double :components (nx ny nz))
+  (gl:color :type :double :components (r g b a)))
+
 (defparameter *fps* 2)
-(defparameter *fft-window-size* 1024)
-
-(defun draw-point (pt)
-  (with-slots (x y z) pt
-    (gl:vertex x y z)))
-
-(defun draw-normal (norm)
-  (with-slots (x y z) norm
-    (gl:normal x y z)))
-
-(defun set-color (color)
-  (with-slots (red green blue alpha) color
-    (let ((color 
-           (make-array 4 :element-type 'double-float :initial-contents (list red green blue alpha))))
-      (gl:material :front-and-back :diffuse color)
-      (gl:material :front-and-back :ambient #( 0.2 0.2 0.2 0.2))
-      )))
-
-(defun draw-tri (triangle)
-  (with-slots (pt1 pt2 pt3 tcolor) triangle
-    (with-slots ((x1 x) (y1 y) (z1 z)) pt1
-      (with-slots ((x2 x) (y2 y) (z2 z)) pt2
-        (with-slots ((x3 x) (y3 y) (z3 z)) pt3
-          (gl:normal (- (* (- y2 y1) (- z3 z1) (* (- y3 y1) (- z2 z1))))
-                     (- (* (- z2 z1) (- x3 x1) (* (- x2 x1) (- z3 z1))))
-                     (- (* (- x2 x1) (- y3 y1) (* (- x3 x1) (- y2 y1)))))
-          ;;(gl:polygon-mode :front-and-back :fill)
-          (set-color tcolor)
-          (gl:vertex x1 y1 z1)
-          (gl:vertex x2 y2 z2)
-          (gl:vertex x3 y3 z3))))))
 
 (defun randr (min max)
   (+ min (random (- max min))))
@@ -51,7 +25,6 @@
       (randr min-val max-val)
       (randr min-val max-val)))
 
-
 (defun tri (pt1 pt2 pt3)
   (geometry:make-triangle
      :normal (tri-normal pt1 pt2 pt3)
@@ -60,15 +33,21 @@
      :pt3 pt3
      :tcolor (random-color)))
 
+(defun random-triangle ()
+  (tri (random-point -120.0 120.0)
+       (random-point -120.0 120.0)
+       (random-point -120.0 120.0)))
+
+
 (defun subdivide (tri)
   (with-slots (pt1 pt2 pt3) tri
     (let (
           (mp1 (midpoint pt1 pt2))
           (mp2 (midpoint pt2 pt3))
           (mp3 (midpoint pt1 pt3)))
-      (incf (point-z mp1) (randr -0.125 0.125))
-      (incf (point-z mp2) (randr -0.125 0.125))
-      (incf (point-z mp3) (randr -0.125 0.125))
+      (incf (point-z mp1) (randr 3.0 8.25))
+      (incf (point-z mp2) (randr 3 8.25))
+      (incf (point-z mp3) (randr 3 8.25))
       (list 
        (tri pt1 mp1 mp3)
        (tri mp1 pt2 mp2)
@@ -76,26 +55,70 @@
        (tri mp2 pt3 mp3)
        ))))
 
-(defun random-triangle ()
-  (tri (random-point 0 8.0)
-       (random-point 0 8.0)
-       (pt 0 0 0)))
-
 (defun generate-landscape (&optional (iterations 4))
-  
-  (let ((results (list (tri (pt 0 0 0)
-                            (pt 0 60 0)
-                            (pt 60 0 0)))))
+  (let ((results (list (tri (pt -20 -20 0)
+                            (pt 80 0 0)
+                            (pt 0 80 0)))))
     (dotimes (i iterations)
       (setf results (apply (alexandria:curry #'concatenate 'list) (mapcar #'subdivide results))))
 
     results))
 
-(defun generate-triangles ()
-  (generate-landscape 4))
+(defstruct scene
+  (triangles (generate-triangles))
+  (vertex-array nil)
+  (indices-array nil))
+
+
+(defun generate-buffers-from-triangles (scene &aux (cidx 0))
+  (with-slots ((tris triangles) (varray vertex-array) (iarray indices-array)) scene
+    (setf varray (gl:alloc-gl-array 'position-normal-color (length tris)))
+    (setf iarray (gl:alloc-gl-array :unsigned-int (* (length tris) 3)))
+    (labels
+        ((fill-pt (pt color normal idx)
+           (with-slots (x y z) pt
+             (with-slots (red green blue alpha) color
+               (with-slots ((nx x) (ny y) (nz z)) normal
+                 (setf (gl:glaref iarray idx) idx)
+                 (setf (gl:glaref varray idx 'x) x)
+                 (setf (gl:glaref varray idx 'y) y)
+                 (setf (gl:glaref varray idx 'z) z)
+                 (setf (gl:glaref varray idx 'nx) nx)
+                 (setf (gl:glaref varray idx 'ny) ny)
+                 (setf (gl:glaref varray idx 'nz) nz)
+                 (setf (gl:glaref varray idx 'r) red)
+                 (setf (gl:glaref varray idx 'g) green)
+                 (setf (gl:glaref varray idx 'b) blue)
+                 (setf (gl:glaref varray idx 'a) alpha)))))
+         (fill-tri (tri idx)
+           (with-slots (tcolor pt1 pt2 pt3 normal) tri
+             (fill-pt pt1 tcolor normal idx)
+             (fill-pt pt1 tcolor normal (+ idx 1))
+             (fill-pt pt1 tcolor normal (+ idx 2))
+             (+ idx 3))))
+      (format t "Generating buffers...~%")
+      (dolist (tri tris)
+        (setf cidx (fill-tri tri cidx)))
+      (format t "Done generating buffers...~%")
+      )))
+
+(defun generate-scene ()
+  (make-scene :triangles (generate-landscape 0)
+              :vertex-array nil
+              :indices-array nil))
+
+(defun render-scene (scene)
+  (with-slots (vertex-array indices-array) scene
+    (gl:enable-client-state :vertex-array)
+    (gl:enable-client-state :color-array)
+    (gl:enable-client-state :normal-array)
+    (gl:bind-gl-vertex-array vertex-array)
+;;    (gl:draw-elements :triangles indices-array)
+    (gl:flush)))
+    
 
 (define-widget shapes-widget (QGLWidget)
-  ((triangles :initform (generate-triangles)))
+  ((scene :initform (generate-scene)))
   (:documentation "Draw random triangles using OpenGL."))
 
 (define-subwidget (shapes-widget timer) (q+:make-qtimer shapes-widget)
@@ -108,7 +131,7 @@
 
 (define-slot (shapes-widget tick) ()
   (declare (connected timer (timeout)))
-  (setf triangles (generate-triangles))
+  ;; (setf triangles (generate-triangles))
   (q+:repaint shapes-widget))
 
 (define-slot (shapes-widget regen regenerate) ()
@@ -123,12 +146,12 @@
 (define-override (shapes-widget resize-g-l) (width height)
   (q+:repaint shapes-widget))
 
-(defun max-radius (triangles)
+(defun max-radius (scene)
   (* 4.0d0 4.0d0))
 
 (define-override (shapes-widget paint-g-l paint) ()
   "Handle paint events."
-  (let* ((max-radius (max-radius triangles))
+  (let* ((max-radius (max-radius scene))
          (width (q+:width shapes-widget))
          (height (q+:height shapes-widget))
          (x-aspect-ratio (if (< height width)
@@ -166,29 +189,41 @@
 
       (gl:clear :color-buffer :depth-buffer)
 
-      (gl:light :light0 :position (vector 0.0 0.0 -100.0 0.0))
+      (gl:light :light0 :position (vector 0.0 0.0 10.0 0.0))
       (gl:light :light0 :diffuse (vector 1.0 1.0 1.0 1.0))
 
+      (gl:depth-mask T)
+      (gl:depth-func :lequal)
+      (gl:blend-func :src-alpha :one-minus-src-alpha)
+      (gl:clear-depth 1.0)
+      (gl:front-face :cw)
+      (gl:cull-face :back)
+      (gl:hint :line-smooth-hint :nicest)
 
       (gl:enable :line-smooth :polygon-smooth
                  :depth-test :depth-clamp :alpha-test
-                 :cull-face
+                 :multisample
                  :lighting :light0
                  )
-      (gl:cull-face :back)
-      (gl:polygon-mode :front-and-back :fill)
+      (gl:polygon-mode :front-and-back :line)
       (gl:draw-buffer :front-and-back)
 
       (gl:push-matrix)
 
-      (gl:with-primitives :triangles
-        (dolist (tri triangles)
-          (draw-tri tri)))
+      (when (null (scene-vertex-array scene))
+        (generate-buffers-from-triangles scene))
+
+      ;; (render-scene scene
 
       (gl:pop-matrix)
 
       (q+:swap-buffers shapes-widget)
       (q+:end-native-painting painter))))
+
+(define-override (shapes-widget close-event) (ev)
+  (gl:free-gl-array (scene-vertex-array scene))
+  (gl:free-gl-array (scene-indices-array scene))
+  (q+:accept ev))
 
 
 (define-widget main-window (QMainWindow)
